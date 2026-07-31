@@ -17,7 +17,7 @@ api-approvers:
   - "@joelspeed"
   - "@enxebre"
 creation-date: 2026-06-09
-last-updated: 2026-07-26
+last-updated: 2026-07-31
 status: provisional
 tracking-link:
   - https://issues.redhat.com/browse/OCPSTRAT-3156
@@ -160,8 +160,10 @@ embedding the shared `ComponentLogLevelSpec` via `json:",inline"`. Each componen
 dedicated Go type (e.g., `KubeAPIServerOperatorSpec`) that can be independently extended in
 the future without breaking vendoring consumers.
 
-When no log level is specified for a component, the default (`Normal`) is used, preserving
-backward compatibility.
+When no log level is specified for a component, the CPO does not inject any verbosity flag,
+preserving the component's existing default (klog default 0 for most components). The
+`--v=N` flag is only added when `logLevel` is explicitly set. This ensures no behavioral
+change for existing clusters that have never configured log levels.
 
 ### Workflow Description
 
@@ -226,7 +228,7 @@ sequenceDiagram
     Admin->>Pod: Collect verbose logs for diagnosis
     Admin->>HC: Reset log level to Normal
     HC->>CPO: Reconcile event
-    CPO->>Deploy: Restore default args (--v=2)
+    CPO->>Deploy: Remove verbosity override (no --v= flag injected)
     Deploy->>Pod: Rolling restart
 ```
 
@@ -249,11 +251,16 @@ type ComponentLogLevelSpec struct {
     // Valid values are: "Normal", "Debug", "Trace", "TraceAll".
     // Setting this field triggers a rolling restart of the component.
     // When omitted, this means the user has no opinion and the platform
-    // defaults to Normal, which is subject to change over time.
+    // preserves the component's existing default verbosity.
     // +optional
-    LogLevel *LogLevel `json:"logLevel,omitempty"`
+    LogLevel LogLevel `json:"logLevel,omitempty"`
 }
 ```
+
+`LogLevel` is a value type (not a pointer). The empty string `""` is not a valid enum
+value — omitting the field is the only way to express "no opinion". This avoids having two
+representations (nil pointer and empty string) for the same semantic, per OCP API
+conventions.
 
 #### Per-Component Wrapper Types
 
@@ -367,7 +374,7 @@ type OperatorConfiguration struct {
 
 | Direction                  | Behavior                                                                              |
 |----------------------------|---------------------------------------------------------------------------------------|
-| N+1 (new code, old data)   | Old data has no log level fields → zero-value structs → defaults apply                |
+| N+1 (new code, old data)   | Old data has no log level fields → zero-value structs → no verbosity flag injected, component keeps existing default |
 | N-1 (old code, new data)   | New data has log level fields → old code ignores unknown JSON keys → no error         |
 
 **Propagation is automatic:** `OperatorConfiguration` is already embedded in
@@ -564,9 +571,9 @@ rolling restart. See "Multi-component changes" under HA Rolling Restart for deta
 
 The testing strategy covers the following areas:
 
-- **Unit tests:** Validate `LogLevelToKlogVerbosity()` mapping for all enum values + nil
+- **Unit tests:** Validate `LogLevelToKlogVerbosity()` mapping for all enum values + zero value (unset)
   (klog `--v=N`).
-- **Unit tests:** Validate `LogLevelToEtcdLevel()` mapping for all enum values + nil
+- **Unit tests:** Validate `LogLevelToEtcdLevel()` mapping for all enum values + zero value (unset)
   (`ETCD_LOG_LEVEL`).
 - **Serialization compat tests:** N-1/N+1 roundtrip for `OperatorConfiguration` with new
   fields set, mixed, and empty.
@@ -645,7 +652,8 @@ annotations are not schema-defined.
 
 **Upgrade:** The new log level fields use `omitzero` (non-pointer struct with
 `json:",omitzero"`). Clusters upgrading from a version without this feature will have
-zero-value structs, and the CPO will continue to use default verbosity (`Normal`). No
+zero-value structs, and the CPO will not inject any verbosity flag — components keep their
+existing default. No
 action is required from the administrator to maintain previous behavior. The existing KAS
 verbosity annotation will continue to be honored during the transition period; if both the
 annotation and the new API field are set, the API field takes precedence.
@@ -775,6 +783,9 @@ with only additive, backward-compatible changes.
 - 2026-07-26: Removed NonDefaultLogLevel status condition, removed E2E tests, removed Dev
   Preview phase, consolidated Goals into single delivery, updated feature gate name to
   HCPUserFacingOperatorLogs
+- 2026-07-31: LogLevel changed from pointer to value type, removed empty string from enum
+  per API review feedback. CPO only injects verbosity flag when logLevel is explicitly set,
+  preserving component defaults for existing clusters
 
 ## Infrastructure Needed
 
